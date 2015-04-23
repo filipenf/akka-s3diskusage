@@ -19,12 +19,10 @@ case class KeyInfo(storageClass : String, keyName : String, size : Long)
 
 
 class PriorityMailbox(settings: ActorSystem.Settings, config: Config) extends UnboundedPriorityMailbox (
-    // Create a new PriorityGenerator, lower prio means more important
-    PriorityGenerator {
-      // 'highpriority messages should be treated first if possible
-      case c: ContinueListingRequest => 0
-      case _ => 1
-    })
+  PriorityGenerator {
+    case c: ContinueListingRequest => 0
+    case _ => 1
+  })
 
 object Defaults {
   val PATH_SEPARATOR = "/"
@@ -80,15 +78,15 @@ case class DirectoryCompleted(path : String)
 
 class Manager extends Actor with ActorLogging {
 
-  var found : Int = 1
+  var found : Int = 0
   var completed : Int = 0
 
   def receive = {
-    case DirectoriesFound(subDirs)=> {
+    case DirectoriesFound(subDirs) =>
       found += subDirs
-      log.info(s"+ $subDirs found ( total = $found / completed = $completed)")
-    }
-    case DirectoryCompleted(path) => {
+      log.debug(s"+ $subDirs found ( total = $found / completed = $completed)")
+
+    case DirectoryCompleted(path) =>
       completed += 1
       log.info(s"Completed dir $path. ${found - completed} remaining")
       if (found - completed == 0) {
@@ -96,14 +94,13 @@ class Manager extends Actor with ActorLogging {
         context.actorSelection("/user/sumActor") ! Defaults.Shutdown
         context stop self
       }
-    }
   }
 }
 
 class RoutingActor extends Actor with ActorLogging {
 
   var router = {
-    val routees = Vector.fill(16) {
+    val routees = Vector.fill(8) {
       val r = context.actorOf(Props[S3ListingActor].withMailbox("prio-mailbox"))
       context watch r
       ActorRefRoutee(r)
@@ -114,10 +111,9 @@ class RoutingActor extends Actor with ActorLogging {
   def receive = {
     case req : ContinueListingRequest => router.route(req, sender())
     case req : ListingRequest => router.route(req, sender())
-    case Defaults.Shutdown => {
+    case Defaults.Shutdown =>
       router.routees.foreach(r => router.removeRoutee(r))
       context stop self
-    }
   }
 
 }
@@ -136,20 +132,13 @@ class S3ListingActor extends Actor with ActorLogging {
   def processListing(request : ListingRequest, listing : ObjectListing) = {
     log.debug(s"Prefix: ${listing.getPrefix} Common prefixes: ${listing.getCommonPrefixes} is_truncated: ${listing.isTruncated}")
     manager ! DirectoriesFound(listing.getCommonPrefixes.length)
-    listing.getCommonPrefixes.foreach(item => {
-      log.info(s"New request for prefix: $item")
-      val name = item.split("/").lastOption.getOrElse("_").replace("/","_")
-      if (name != "_") {
-        router ! request.copy(prefix = item)
-      }
+    listing.getCommonPrefixes.filter(_.length>1).foreach(item => {
+      router ! request.copy(prefix = item)
     })
-    listing.getObjectSummaries.iterator().foreach( item => {
+    listing.getObjectSummaries.iterator().foreach(item => {
       sumActor ! KeyInfo(item.getStorageClass, item.getKey, item.getSize)
     })
     if (listing.isTruncated) {
-      log.info(s"${request.prefix} listing is truncated. Requesting more data...")
-      listing.getObjectSummaries.clear()
-      listing.setCommonPrefixes(null)
       router ! ContinueListingRequest(request, listing)
     } else {
       manager ! DirectoryCompleted(request.prefix)
@@ -158,11 +147,10 @@ class S3ListingActor extends Actor with ActorLogging {
 
   def receive = {
     case r: ContinueListingRequest => continueListing(r)
-    case r: ListingRequest => {
+    case r: ListingRequest =>
       val listing = r.client.listObjects(new ListObjectsRequest().withBucketName(r.bucketName).
         withPrefix(r.prefix).withDelimiter(Defaults.PATH_SEPARATOR))
       processListing(r, listing)
-    }
   }
 }
 
@@ -175,23 +163,19 @@ class S3SumActor extends Actor with ActorLogging {
   override def preStart() = system.scheduler.schedule(30000 millis, 30000 millis, self, "report")
 
   def receive = {
-   case KeyInfo (storageClass, keyName, keySize) => {
-     val splitKey = keyName.split(Defaults.PATH_SEPARATOR)
-     if (splitKey.length >= 2) {
-       breakout(storageClass)(splitKey(0))(splitKey(1)) += keySize
-     }
-   }
-   case "report" => log.info(breakout.toString)
-   case Defaults.Shutdown => {
-     println("Results:")
-     println(breakout)
-     context stop self
-     system.shutdown()
-   }
+    case KeyInfo (storageClass, keyName, keySize) =>
+      val splitKey = keyName.split(Defaults.PATH_SEPARATOR)
+      if (splitKey.length >= 2) {
+        breakout(storageClass)(splitKey(0))(splitKey(1)) += keySize
+      }
+    case "report" => log.info(breakout.toString)
+    case Defaults.Shutdown =>
+      println("Results:")
+      println(breakout)
+      context stop self
+      system.shutdown()
   }
-
 }
-
 
 object S3Usage extends App {
   private val credentials = new BasicAWSCredentials(args(0), args(1))
@@ -200,20 +184,18 @@ object S3Usage extends App {
 
   private val amazonS3Client = new AmazonS3Client(credentials, clientConfig)
 
-  val conf = ConfigFactory.parseString("""
-      prio-mailbox {
-        mailbox-type = "PriorityMailbox"
-        //Other mailbox configuration goes here
-      }
+  val conf = ConfigFactory.parseString(
+    """
+      |      prio-mailbox {
+      |        mailbox-type = "PriorityMailbox"
+      |      }
     """.stripMargin)
 
   val system = ActorSystem("S3DU", conf)
-//  val listingActor = system.actorOf(Props[S3ListingActor], name = "listingActor")
   val sumActor = system.actorOf(Props[S3SumActor], name="sumActor")
   val manager = system.actorOf(Props[Manager], name="manager")
   val router = system.actorOf(Props[RoutingActor], name="router")
 
   router ! ListingRequest(amazonS3Client, args(2), "")
-
 
 }
