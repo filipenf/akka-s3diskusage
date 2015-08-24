@@ -1,0 +1,6 @@
+test:
+  override:
+    - sbt assembly
+  post:
+    - mv target/scala-2.10/s3du.jar ${CIRCLE_ARTIFACTS}/
+

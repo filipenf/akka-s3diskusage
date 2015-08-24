@@ -4,6 +4,9 @@ version := "1.0"
 
 scalaVersion := "2.10.4"
 
+mainClass in Compile := Some("S3Usage")
+
+jarName in assembly := "s3du.jar"
 
 libraryDependencies ++= {
   val akkaVersion  = "2.3.2"
